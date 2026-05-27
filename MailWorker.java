@@ -5,7 +5,7 @@
 //DEPS jakarta.mail:jakarta.mail-api:2.1.3
 //DEPS org.eclipse.angus:angus-mail:2.0.3
 //SOURCES Config.java MailFetcher.java MailTriager.java MailAction.java EmailSender.java IdempotencyStore.java
-//SOURCES PendingStore.java ResultHandlers.java Installer.java
+//SOURCES PendingStore.java BusHandlers.java Installer.java
 //SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/EnvelopeOptions.java
 //SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusEnvelope.java
 //SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusHandler.java
@@ -70,18 +70,22 @@ public class MailWorker implements Runnable {
             var sender   = new EmailSender(config);
             var pending  = PendingStore.open(config);
 
-            // 1. Drain any result-callbacks from peer elves first. This sends
-            //    the URL follow-up for previously-filed issues before we
-            //    process new inbound mail.
+            // 1. Drain any bus messages from peer elves first. Two kinds:
+            //    - github.issue.create.result: send the URL follow-up to the
+            //      original mail sender (terminal; no result emitted).
+            //    - mail.send: send an outbound email on behalf of a peer elf;
+            //      emit a mail.send.result with the SMTP Message-Id.
             //
-            //    Results are terminal — mail-worker never emits a reply to a
-            //    result — so the consumer's replyProducer is null.
+            //    mail.send emits a result, so the consumer needs a replyProducer.
             var reader = new ElfBusConsumer(
                     config.busRoot(),
                     config.elfName(),
                     config.busSeenIdsPath(),
-                    List.of(new ResultHandlers.IssueCreated(sender, pending, config)),
-                    /*replyProducer*/ null
+                    List.of(
+                            new BusHandlers.IssueCreated(sender, pending, config),
+                            new BusHandlers.MailSend(sender, config.allowedRecipients())
+                    ),
+                    /*replyProducer*/ bus
             );
             try {
                 reader.poll();

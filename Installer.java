@@ -69,6 +69,9 @@ public final class Installer {
         cfg.put("SMTP_PASSWORD",     smtpPw.isEmpty() ? cfg.get("IMAP_PASSWORD") : smtpPw);
 
         cfg.put("ALLOWED_SENDERS",   require(prompt(console, fallback, "Allowed senders (comma-sep)", "")));
+        cfg.put("ALLOWED_RECIPIENTS", prompt(console, fallback,
+                "Allowed outbound recipients for mail.send (comma-sep)",
+                cfg.get("PRINCIPAL_EMAIL")));
         cfg.put("ACTIVE_HOURS",      prompt(console, fallback, "Active hours (e.g. 07-22)",   "07-22"));
         cfg.put("AGENT_MODEL",       prompt(console, fallback, "Claude model",                "claude-sonnet-4-6"));
 
