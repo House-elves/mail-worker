@@ -1,0 +1,13 @@
+{
+  "catalogs": {},
+  "aliases": {
+    "mail-worker": {
+      "script-ref": "MailWorker.java",
+      "description": "House Elf that triages inbound email and dispatches actions via the elf-bus"
+    },
+    "mail-worker-ui": {
+      "script-ref": "MailWorkerUI.java",
+      "description": "Quarkus dashboard for monitoring mail-worker"
+    }
+  }
+}
