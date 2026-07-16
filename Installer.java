@@ -179,7 +179,8 @@ public final class Installer {
 
                 [Service]
                 Type=oneshot
-                ExecStart=/usr/bin/env jbang mail-worker --once
+                Environment=PATH=%h/.local/bin:%h/.jbang/bin:%h/.sdkman/candidates/jbang/current/bin:%h/.sdkman/candidates/java/current/bin:/usr/local/bin:/usr/bin
+                ExecStart=%h/.jbang/bin/mail-worker --once
                 """;
 
         String timer = String.format("""
