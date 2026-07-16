@@ -83,6 +83,7 @@ public class MailWorker implements Runnable {
                     config.busSeenIdsPath(),
                     List.of(
                             new BusHandlers.IssueCreated(sender, pending, config),
+                            new BusHandlers.SessionResult(sender, pending, config),
                             new BusHandlers.MailSend(sender, config.allowedRecipients())
                     ),
                     /*replyProducer*/ bus
@@ -104,7 +105,15 @@ public class MailWorker implements Runnable {
                 }
                 System.out.printf("triaging from=%s subj=%s%n", msg.from(), msg.subject());
                 try {
-                    MailAction action = triager.triage(msg);
+                    // Session routing is decided IN CODE, never by the triage
+                    // agent: a SESSION_SENDERS address with a passing DKIM
+                    // result goes straight to session-worker ("do what the
+                    // mail says"). A session sender that fails DKIM smells
+                    // like spoofing - it falls through to zero-tool triage,
+                    // where the worst an attacker gets is a polite reply.
+                    MailAction action = isSessionMail(config, msg)
+                            ? new MailAction.RunSession()
+                            : triager.triage(msg);
                     String actionName = action.getClass().getSimpleName();
                     System.out.println("action=" + actionName);
                     action.execute(new MailAction.Context(msg, sender, bus, config, pending));
@@ -120,6 +129,13 @@ public class MailWorker implements Runnable {
             System.err.println("mail-worker: " + e.getMessage());
             System.exit(1);
         }
+    }
+
+    private static boolean isSessionMail(Config config, MailFetcher.InboundMail msg) {
+        if (!config.sessionSenders.contains(msg.from().toLowerCase())) return false;
+        if (msg.dkimPass()) return true;
+        System.out.printf("session sender %s FAILED DKIM - falling back to triage%n", msg.from());
+        return false;
     }
 
     /**

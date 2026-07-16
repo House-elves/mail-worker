@@ -116,6 +116,56 @@ public final class BusHandlers {
      * recipients raise IllegalArgumentException, which the consumer
      * dead-letters (not retryable — config won't change between attempts).
      */
+    /**
+     * session-worker finished (or failed) a mail-driven Claude session:
+     * forward the outcome to the principal as a threaded reply, so replying
+     * to THAT mail continues the same session.
+     */
+    public static final class SessionResult implements ElfBusHandler {
+        private final EmailSender sender;
+        private final PendingStore pending;
+        private final Config config;
+
+        public SessionResult(EmailSender sender, PendingStore pending, Config config) {
+            this.sender = sender;
+            this.pending = pending;
+            this.config = config;
+        }
+
+        @Override public String kind() { return "session.run.result"; }
+
+        @Override
+        public Map<String, Object> execute(ElfBusEnvelope env) throws Exception {
+            String correlationId = env.correlationId();
+            if (correlationId == null || correlationId.isBlank()) {
+                throw new IllegalStateException("result without correlation id");
+            }
+            Optional<PendingStore.PendingReply> maybe = pending.take(correlationId);
+            if (maybe.isEmpty()) {
+                System.out.println("session result: no pending entry for " + correlationId + "; dropping");
+                return null;
+            }
+            PendingStore.PendingReply pr = maybe.get();
+
+            JsonNode b = env.body();
+            String status = b.path("status").asText("ok");
+            String body;
+            if (!"ok".equals(status)) {
+                body = "The session hit a problem - " + b.path("error").asText("(no detail)")
+                        + ".\n\nReply to this email to try again in the same session.\n\n- "
+                        + config.elfName;
+            } else {
+                body = b.path("reply_body").asText("(the session produced no output)")
+                        + "\n\n- " + config.elfName
+                        + " (reply to this email to continue the session)";
+            }
+            var fake = new MailFetcher.InboundMail(
+                    pr.inboundMessageId(), pr.fromAddress(), pr.subject(), "", "", "");
+            sender.reply(fake, body);
+            return null;
+        }
+    }
+
     public static final class MailSend implements ElfBusHandler {
         private final EmailSender sender;
         private final Set<String> allowed;

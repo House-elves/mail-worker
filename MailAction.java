@@ -29,7 +29,8 @@ public sealed interface MailAction
                 MailAction.EnqueueGitHubIssueCreate,
                 MailAction.EnqueueGitHubComment,
                 MailAction.EnqueueGitHubLabel,
-                MailAction.CreateCalendarEvent {
+                MailAction.CreateCalendarEvent,
+                MailAction.RunSession {
 
     /** Bundle of collaborators handed to each action's execute(). */
     record Context(
@@ -104,6 +105,36 @@ public sealed interface MailAction
                     envelopeOpts(ctx, /*replyTo*/ false)
             );
             if (replyBody != null && !replyBody.isBlank()) ctx.sender().reply(ctx.email(), replyBody);
+        }
+    }
+
+    /**
+     * The principal's mail becomes a Claude Code session on the host,
+     * carried out by session-worker. NEVER produced by triage: MailWorker
+     * routes to this action in code, only for SESSION_SENDERS whose message
+     * passed DKIM. The reply arrives later as a session.run.result.
+     */
+    record RunSession() implements MailAction {
+        @Override public void execute(Context ctx) throws Exception {
+            var email = ctx.email();
+            ctx.pending().put(new PendingStore.PendingReply(
+                    /* correlationId   */ email.messageId(),
+                    /* fromAddress     */ email.from(),
+                    /* subject         */ email.subject(),
+                    /* inboundMessageId*/ email.messageId()
+            ));
+            ctx.bus().enqueue(
+                    "session-worker",
+                    "session.run",
+                    Map.of(
+                            "thread_key", email.threadKey(),
+                            "subject", email.subject(),
+                            "body", email.body(),
+                            "from", email.from(),
+                            "attachments", email.attachments()
+                    ),
+                    envelopeOpts(ctx, /*replyTo*/ true)
+            );
         }
     }
 

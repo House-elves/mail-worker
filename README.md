@@ -13,6 +13,7 @@ The triage agent picks exactly one action from this menu per inbound email:
 | Action | Outcome |
 |---|---|
 | `ignore` | Drop the email; do nothing. |
+| `run-session` | (Code-routed, never chosen by triage.) Mail from a `SESSION_SENDERS` address with a passing DKIM result is enqueued as `session.run` for [session-worker](https://github.com/House-elves/session-worker); the session's answer comes back as a threaded reply, and replying to THAT continues the same Claude session. Attachments are spooled to disk and handed to the session. |
 | `reply` | Send a plain-text SMTP reply, threaded via `In-Reply-To`. |
 | `create-issue` | Enqueue `github.issue.create` onto the bus; auto-reply to sender with the issue URL when the result comes back. |
 | `comment-on-issue` | Enqueue `github.issue.comment` onto the bus. |
@@ -56,6 +57,7 @@ Stored in `~/.config/mail-worker/config` as `KEY=VALUE` lines:
 | `IMAP_HOST` / `IMAP_PORT` / `IMAP_USER` / `IMAP_PASSWORD` | yes | `imap.gmail.com:993` | Incoming mail. App passwords recommended. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` | yes | `smtp.gmail.com:465` | Outbound replies. |
 | `ALLOWED_SENDERS` | yes | — | Comma-separated inbound `From:` addresses allowed to reach triage. |
+| `SESSION_SENDERS` | no | (empty) | Subset of allowed senders whose DKIM-verified mail bypasses triage and runs as a full Claude Code session via [session-worker](https://github.com/House-elves/session-worker). Empty = feature off. |
 | `ALLOWED_RECIPIENTS` | no | `PRINCIPAL_EMAIL` | Comma-separated outbound `To:` addresses the `mail.send` bus handler may send to. Defaults to just the principal. |
 | `ACTIVE_HOURS` | no | `07-22` | Only triage between these hours. |
 | `AGENT_MODEL` | no | `claude-sonnet-4-6` | Which Claude model the triage agent uses. |
@@ -67,6 +69,7 @@ Stored in `~/.config/mail-worker/config` as `KEY=VALUE` lines:
 mail-worker enforces five invariants regardless of what the triage agent or a producer elf asks for:
 
 1. **Sender allow-list (inbound).** Only mail from `ALLOWED_SENDERS` reaches the triage agent. Everything else is silently dropped before any Claude call.
+1. **Session gate.** The `run-session` route (remote code execution by design) is decided in code, never by the triage agent: sender must be in `SESSION_SENDERS` AND the message must carry `dkim=pass` in Gmail's `Authentication-Results`. A session sender that fails DKIM smells like spoofing and falls back to zero-tool triage.
 2. **Recipient allow-list (outbound).** The `mail.send` bus handler refuses any `to:` address not in `ALLOWED_RECIPIENTS`. Forbidden recipients dead-letter on the first attempt — no retry — so a misbehaving producer can't loop on a rejected address.
 3. **Zero-tool triage.** Triage runs in `runBare` mode — no tools, no filesystem, no shell. The email body is fenced in the system prompt and explicitly marked as untrusted data.
 4. **Action allow-list.** Enforced in code, not in the prompt. The label action accepts only `approval:granted`; forbidden labels are rejected by the executor even if the model emits them.

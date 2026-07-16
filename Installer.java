@@ -69,6 +69,8 @@ public final class Installer {
         cfg.put("SMTP_PASSWORD",     smtpPw.isEmpty() ? cfg.get("IMAP_PASSWORD") : smtpPw);
 
         cfg.put("ALLOWED_SENDERS",   require(prompt(console, fallback, "Allowed senders (comma-sep)", "")));
+        cfg.put("SESSION_SENDERS",   prompt(console, fallback,
+                "Session senders - mail from these becomes a Claude session; blank disables (comma-sep)", ""));
         cfg.put("ALLOWED_RECIPIENTS", prompt(console, fallback,
                 "Allowed outbound recipients for mail.send (comma-sep)",
                 cfg.get("PRINCIPAL_EMAIL")));
@@ -96,9 +98,13 @@ public final class Installer {
     private static String prompt(Console console, BufferedReader fallback, String label, String dflt) {
         String suffix = dflt.isEmpty() ? "" : " [" + dflt + "]";
         try {
-            String s = (console != null)
-                    ? console.readLine("%s%s: ", label, suffix)
-                    : (System.out.print(label + suffix + ": ") == null ? fallback.readLine() : fallback.readLine());
+            String s;
+            if (console != null) {
+                s = console.readLine("%s%s: ", label, suffix);
+            } else {
+                System.out.print(label + suffix + ": ");
+                s = fallback.readLine();
+            }
             if (s == null || s.isBlank()) return dflt;
             return s.strip();
         } catch (IOException e) {
