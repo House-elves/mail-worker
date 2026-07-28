@@ -32,7 +32,9 @@ public class Config {
     String smtpUser;
     String smtpPassword;
 
-    Set<String> allowedSenders;     // From: addresses we accept (case-insensitive)
+    Set<String> allowedSenders;     // inbound From: addresses we accept (case-insensitive)
+    Set<String> sessionSenders;     // subset of senders whose mail becomes a Claude session (case-insensitive)
+    Set<String> allowedRecipients;  // outbound To: addresses the mail.send handler may send to (case-insensitive)
     String activeHours;             // e.g. "07-22"
     String agent;                   // "claude" by default
     String agentModel;              // e.g. "claude-sonnet-4-6"
@@ -73,6 +75,15 @@ public class Config {
         c.smtpPassword   = raw.getOrDefault("SMTP_PASSWORD", c.imapPassword);
         c.allowedSenders = parseSet(raw.getOrDefault("ALLOWED_SENDERS", ""))
                                 .stream().map(String::toLowerCase).collect(Collectors.toUnmodifiableSet());
+        // Recipient allow-list for the mail.send bus kind. Defaults to the
+        // principal email — the safest sender-equals-recipient baseline.
+        c.allowedRecipients = parseSet(raw.getOrDefault("ALLOWED_RECIPIENTS", c.principalEmail))
+                                .stream().map(String::toLowerCase).collect(Collectors.toUnmodifiableSet());
+        // Senders whose (DKIM-verified) mail is routed to session-worker as a
+        // full Claude session instead of zero-tool triage. Default empty:
+        // the feature is off until the operator opts addresses in.
+        c.sessionSenders = parseSet(raw.getOrDefault("SESSION_SENDERS", ""))
+                                .stream().map(String::toLowerCase).collect(Collectors.toUnmodifiableSet());
         c.activeHours    = raw.getOrDefault("ACTIVE_HOURS", "07-22");
         c.agent          = raw.getOrDefault("AGENT", "claude");
         c.agentModel     = raw.getOrDefault("AGENT_MODEL", "claude-sonnet-4-6");
@@ -103,12 +114,14 @@ public class Config {
         }
     }
 
-    String   elfName()        { return elfName; }
-    Path     stateDir()       { return stateDir; }
-    Path     busRoot()        { return busRoot; }
-    Path     lockPath()       { return stateDir.resolve("lock"); }
-    Path     processedDir()   { return stateDir.resolve("processed-mail"); }
-    Path     busSeenIdsPath() { return stateDir.resolve("elf-bus-seen"); }
+    String      elfName()           { return elfName; }
+    Path        stateDir()          { return stateDir; }
+    Path        busRoot()           { return busRoot; }
+    Path        lockPath()          { return stateDir.resolve("lock"); }
+    Path        processedDir()      { return stateDir.resolve("processed-mail"); }
+    Path        busSeenIdsPath()    { return stateDir.resolve("elf-bus-seen"); }
+    Path        attachmentsDir()    { return stateDir.resolve("attachments"); }
+    Set<String> allowedRecipients() { return allowedRecipients; }
 
     private static Set<String> parseSet(String csv) {
         return Arrays.stream(csv.split(","))

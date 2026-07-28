@@ -5,16 +5,16 @@
 //DEPS jakarta.mail:jakarta.mail-api:2.1.3
 //DEPS org.eclipse.angus:angus-mail:2.0.3
 //SOURCES Config.java MailFetcher.java MailTriager.java MailAction.java EmailSender.java IdempotencyStore.java
-//SOURCES PendingStore.java ResultHandlers.java Installer.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/EnvelopeOptions.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusEnvelope.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusHandler.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusProducer.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusInboxes.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusSeenIds.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/FileSystemBus.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/ElfBusConsumer.java
-//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.0/InMemoryBus.java
+//SOURCES PendingStore.java BusHandlers.java Installer.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/EnvelopeOptions.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusEnvelope.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusHandler.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusProducer.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusInboxes.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusSeenIds.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/FileSystemBus.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusConsumer.java
+//SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/InMemoryBus.java
 
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -70,18 +70,23 @@ public class MailWorker implements Runnable {
             var sender   = new EmailSender(config);
             var pending  = PendingStore.open(config);
 
-            // 1. Drain any result-callbacks from peer elves first. This sends
-            //    the URL follow-up for previously-filed issues before we
-            //    process new inbound mail.
+            // 1. Drain any bus messages from peer elves first. Two kinds:
+            //    - github.issue.create.result: send the URL follow-up to the
+            //      original mail sender (terminal; no result emitted).
+            //    - mail.send: send an outbound email on behalf of a peer elf;
+            //      emit a mail.send.result with the SMTP Message-Id.
             //
-            //    Results are terminal — mail-worker never emits a reply to a
-            //    result — so the consumer's replyProducer is null.
+            //    mail.send emits a result, so the consumer needs a replyProducer.
             var reader = new ElfBusConsumer(
                     config.busRoot(),
                     config.elfName(),
                     config.busSeenIdsPath(),
-                    List.of(new ResultHandlers.IssueCreated(sender, pending, config)),
-                    /*replyProducer*/ null
+                    List.of(
+                            new BusHandlers.IssueCreated(sender, pending, config),
+                            new BusHandlers.SessionResult(sender, pending, config),
+                            new BusHandlers.MailSend(sender, config.allowedRecipients())
+                    ),
+                    /*replyProducer*/ bus
             );
             try {
                 reader.poll();
@@ -100,7 +105,15 @@ public class MailWorker implements Runnable {
                 }
                 System.out.printf("triaging from=%s subj=%s%n", msg.from(), msg.subject());
                 try {
-                    MailAction action = triager.triage(msg);
+                    // Session routing is decided IN CODE, never by the triage
+                    // agent: a SESSION_SENDERS address with a passing DKIM
+                    // result goes straight to session-worker ("do what the
+                    // mail says"). A session sender that fails DKIM smells
+                    // like spoofing - it falls through to zero-tool triage,
+                    // where the worst an attacker gets is a polite reply.
+                    MailAction action = isSessionMail(config, msg)
+                            ? new MailAction.RunSession()
+                            : triager.triage(msg);
                     String actionName = action.getClass().getSimpleName();
                     System.out.println("action=" + actionName);
                     action.execute(new MailAction.Context(msg, sender, bus, config, pending));
@@ -116,6 +129,13 @@ public class MailWorker implements Runnable {
             System.err.println("mail-worker: " + e.getMessage());
             System.exit(1);
         }
+    }
+
+    private static boolean isSessionMail(Config config, MailFetcher.InboundMail msg) {
+        if (!config.sessionSenders.contains(msg.from().toLowerCase())) return false;
+        if (msg.dkimPass()) return true;
+        System.out.printf("session sender %s FAILED DKIM - falling back to triage%n", msg.from());
+        return false;
     }
 
     /**
