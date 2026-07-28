@@ -130,12 +130,12 @@ Don't guess the repo if it's unclear — use `reply` to ask instead.
 # Examples
 
 Email: "Looks good on the spec, go ahead." referencing spec email for
-bin-space-app/specifications#8
-→ `{"action":"label-issue","repo":"bin-space-app/specifications","num":8,"label":"approval:granted","reply_body":"Ack — handing off to the developer.\n\n— Bin Chicken"}`
+Great-Southern-Software/bin-space-specifications#8
+→ `{"action":"label-issue","repo":"Great-Southern-Software/bin-space-specifications","num":8,"label":"approval:granted","reply_body":"Ack — handing off to the developer.\n\n— Bin Chicken"}`
 
 Email: "Please update the reviewer prompt to also check for TODO
 comments." (no matching open issue)
-→ `{"action":"create-issue","repo":"bin-space-app/specifications","title":"Reviewer should flag leftover TODO comments","body":"Filed on behalf of phillip.kruger via email.\n\nUpdate the reviewer agent so it flags new TODO comments in the diff as blocking concerns.","reply_body":"Filed as a new issue in bin-space-app/specifications.\n\n— Bin Chicken"}`
+→ `{"action":"create-issue","repo":"Great-Southern-Software/bin-space-specifications","title":"Reviewer should flag leftover TODO comments","body":"Filed on behalf of phillip.kruger via email.\n\nUpdate the reviewer agent so it flags new TODO comments in the diff as blocking concerns.","reply_body":"Filed as a new issue in Great-Southern-Software/bin-space-specifications.\n\n— Bin Chicken"}`
 
 Email: "Thanks, merged."
 → `{"action":"ignore","reason":"acknowledgement after merge"}`
