@@ -62,7 +62,10 @@ public sealed interface MailAction
                                     String replyBody) implements MailAction {
         @Override public void execute(Context ctx) throws Exception {
             // Provenance is enforced HERE, not in the prompt — the agent can forget.
-            String prefix = "Filed on behalf of " + ctx.config().principalName + " via email.";
+            // Name the actual sender, not the principal: more than one person
+            // files requests by mail now, and an issue that credits the wrong
+            // one sends the follow-up questions to the wrong inbox.
+            String prefix = "Filed on behalf of " + ctx.email().from() + " via email.";
             String bodyWithProvenance = body.contains(prefix) ? body : prefix + "\n\n" + body;
 
             // Stash pending-reply state BEFORE enqueueing. If the enqueue
