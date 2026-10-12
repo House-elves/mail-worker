@@ -160,6 +160,18 @@ public class MailWorker implements Runnable {
                     } catch (Exception e) {
                         System.err.printf("customer mail failed for %s: %s%n", msg.messageId(), e.getMessage());
                         logTriage(config, msg, null, e.getMessage());
+                        // Retry a few ticks, then hand it to a person rather than calling Claude forever.
+                        try {
+                            if (customers.failedOnce(msg.messageId()) >= 3) {
+                                customers.execute(msg, new CustomerMail.Draft("", "",
+                                        "Bin Chicken could not read this email after three tries, so it needs you."), false);
+                                seen.add(msg.messageId());
+                                fetcher.markSeen(msg.messageId());
+                                logTriage(config, msg, "CustomerGaveUp", e.getMessage());
+                            }
+                        } catch (Exception again) {
+                            System.err.println("could not hand over failed customer mail: " + again.getMessage());
+                        }
                     }
                 }
             }
@@ -186,8 +198,10 @@ public class MailWorker implements Runnable {
 
     private static boolean isSessionMail(Config config, MailFetcher.InboundMail msg) {
         if (!config.sessionSenders.contains(msg.from().toLowerCase())) return false;
-        if (msg.dkimPass()) return true;
-        System.out.printf("session sender %s FAILED DKIM - falling back to triage%n", msg.from());
+        // Not dkimPass(): any signature from any domain satisfies that, so a
+        // forged From signed by the forger's own domain got a session.
+        if (msg.fromDomainVerified()) return true;
+        System.out.printf("session sender %s not verified (DKIM/DMARC for the From domain) - falling back to triage%n", msg.from());
         return false;
     }
 

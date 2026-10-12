@@ -28,9 +28,10 @@ import java.util.Map;
  * hostile email gets is a draft in the principal's inbox:
  *
  *   - SUPPORT_AUTO_REPLY is on;
- *   - the sender's DKIM signature passed (a forged From never gets an answer
- *     meant for the real owner of the address);
- *   - nobody else is on the thread (a reply to the sender alone would drop them);
+ *   - Gmail vouches for the From domain, by DMARC or a DKIM signature from
+ *     that domain (a forged From never gets an answer, nor gets us to write
+ *     to a stranger);
+ *   - nobody else is on the thread, in To or Cc (a reply to the sender alone would drop them);
  *   - the sender has had fewer than SUPPORT_REPLIES_PER_DAY replies in 24h;
  *   - the reply is short and carries no links except to our own domains.
  *
@@ -42,6 +43,7 @@ public final class CustomerMail {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_REPLY_CHARS = 2500;
     private static final int MAX_QUOTED_CHARS = 6000;
+    private static final int MAX_PROMPT_BODY_CHARS = 20000;  // one argv entry; Linux caps it near 128 KB
 
     sealed interface Decision permits Ignore, Draft, Reply {}
     record Ignore(String reason) implements Decision {}
@@ -83,8 +85,9 @@ public final class CustomerMail {
         if (!(proposed instanceof Reply r)) return proposed;
         String why = null;
         if (!config.supportAutoReply) why = "Direct replies are turned off (SUPPORT_AUTO_REPLY).";
-        else if (!msg.dkimPass()) why = "The sender's email did not pass DKIM, so it may not really be from them.";
+        else if (!msg.fromDomainVerified()) why = "Gmail could not confirm the email really came from their address (DMARC).";
         else if (!msg.cc().isEmpty()) why = "Other people are copied on their email.";
+        else if (!onlyToUs(msg)) why = "Their email was addressed to other people as well, or only copied to us.";
         else if (r.replyBody().isBlank() || r.replyBody().length() > MAX_REPLY_CHARS) why = "The answer is long enough that you should read it first.";
         else if (hasForeignLink(r.replyBody(), msg.from())) why = "The answer has a link to a site that is not ours.";
         else if (repliesInLastDay(msg.from()) >= config.supportRepliesPerDay) why = "They already had " + config.supportRepliesPerDay + " automatic answers today.";
@@ -141,21 +144,52 @@ public final class CustomerMail {
         return msg.fromName() == null || msg.fromName().isBlank() ? msg.from() : msg.fromName();
     }
 
-    /** Any link or domain that is neither ours nor the sender's own. */
-    private static boolean hasForeignLink(String body, String from) {
+    private static final java.util.regex.Pattern URL =
+            java.util.regex.Pattern.compile("(?i)[a-z][a-z0-9+.-]*://([^/?#\\s]*)");
+    // Anything shaped like a domain, any ending: an address, a link without a
+    // scheme, a filename. Too broad on purpose; a false hit only makes a draft.
+    private static final java.util.regex.Pattern DOMAIN =
+            java.util.regex.Pattern.compile("(?i)(?:[a-z0-9-]+\\.)+[a-z]{2,}");
+
+    /**
+     * Any link or domain that is neither ours nor the sender's own, or
+     * anything that could disguise one: credentials or odd characters in a
+     * link, or non-ASCII text (look-alike letters). Errs towards a draft.
+     */
+    static boolean hasForeignLink(String body, String from) {
         String theirs = from.substring(from.indexOf('@') + 1).toLowerCase();
-        var m = java.util.regex.Pattern.compile("(?i)https?://([^/\\s)>\"']+)").matcher(body);
-        while (m.find()) {
-            String host = m.group(1).toLowerCase();
-            if (!isOurs(host, theirs)) return true;
+        for (int k = 0; k < body.length(); k++) {
+            char c = body.charAt(k);
+            if (c > 0x7e && "\u2018\u2019\u201c\u201d\u2013\u2026\u00a0".indexOf(c) < 0) return true;
         }
-        // A bare domain that is not ours ("evil.example/login") is a link to a reader too.
-        var bare = java.util.regex.Pattern.compile("(?i)\\b([a-z0-9-]+\\.)+(com|net|org|au|io|app|co|info|biz|xyz|link|site|online)\\b(/\\S*)?").matcher(body);
-        while (bare.find()) {
-            String host = bare.group().toLowerCase().replaceAll("/.*", "");
-            if (!isOurs(host, theirs)) return true;
+        var u = URL.matcher(body);
+        while (u.find()) {
+            String authority = u.group(1).toLowerCase();
+            if (!authority.matches("[a-z0-9.-]+(:\\d+)?")) return true;   // user@host, backslashes, %-escapes
+            if (!isOurs(authority.replaceAll(":\\d+$", ""), theirs)) return true;
+        }
+        var d = DOMAIN.matcher(body);
+        while (d.find()) {
+            if (!isOurs(d.group().toLowerCase(), theirs)) return true;
         }
         return false;
+    }
+
+    private boolean onlyToUs(MailFetcher.InboundMail msg) {
+        if (msg.to().isEmpty()) return false;
+        for (String to : msg.to()) {
+            if (!(to.equalsIgnoreCase(config.imapUser) || to.equalsIgnoreCase(config.smtpUser)
+                    || to.equalsIgnoreCase(config.supportFrom))) return false;
+        }
+        return true;
+    }
+
+    /** Count one failure for this message; returns the count so far. */
+    int failedOnce(String messageId) throws IOException {
+        var log = config.stateDir().resolve("customer-failures.log");
+        Files.createDirectories(log.getParent());
+        Files.writeString(log, messageId + System.lineSeparator(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        return (int) Files.readAllLines(log).stream().filter(messageId::equals).count();
     }
 
     private static boolean isOurs(String host, String theirs) {
@@ -205,6 +239,11 @@ public final class CustomerMail {
                 %s
                 ---
                 """.formatted(m.fromName(), m.from(), String.join(", ", m.cc()), m.subject(), m.date(),
-                              java.time.LocalDate.now(), m.body() == null ? "" : m.body());
+                              java.time.LocalDate.now(), cap(m.body()));
+    }
+
+    private static String cap(String body) {
+        if (body == null) return "";
+        return body.length() <= MAX_PROMPT_BODY_CHARS ? body : body.substring(0, MAX_PROMPT_BODY_CHARS) + "\n[cut: the email is longer]";
     }
 }

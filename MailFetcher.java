@@ -28,13 +28,14 @@ public class MailFetcher {
             String authResults,
             List<String> attachments,
             String fromName,
-            List<String> cc
+            List<String> cc,
+            List<String> to
     ) {
         public InboundMail(String messageId, String from, String subject, String date,
                 String inReplyTo, String body, String references, String authResults,
                 List<String> attachments) {
             this(messageId, from, subject, date, inReplyTo, body, references, authResults,
-                    attachments, "", List.of());
+                    attachments, "", List.of(), List.of());
         }
 
         /** Convenience for legacy call sites that carry no session fields. */
@@ -61,6 +62,26 @@ public class MailFetcher {
         /** Whether Gmail authenticated the sender's DKIM signature. */
         public boolean dkimPass() {
             return authResults != null && authResults.toLowerCase().contains("dkim=pass");
+        }
+
+        /**
+         * Whether Gmail itself vouches for the From domain, in the topmost
+         * Authentication-Results (the one mx.google.com adds; any lower one
+         * could come from the sender): DMARC passed for that domain, or a DKIM
+         * signature from that domain passed. Comments in parentheses are
+         * ignored, and ARC is not trusted, since its text is relayed from
+         * earlier hops. Stricter than {@link #dkimPass}, which any signature
+         * for any domain satisfies. Gates every direct customer reply.
+         */
+        public boolean fromDomainVerified() {
+            if (authResults == null || authResults.isBlank() || from == null || from.indexOf('@') < 0) return false;
+            String top = authResults.split("\\n", 2)[0].toLowerCase();
+            if (!top.stripLeading().startsWith("mx.google.com;")) return false;
+            String plain = top.replaceAll("\\([^)]*\\)", "");
+            String d = java.util.regex.Pattern.quote(from.substring(from.indexOf('@') + 1).toLowerCase());
+            String end = "(?![\\w.-])";
+            return java.util.regex.Pattern.compile("\\bdmarc=pass\\b[^;]*\\bheader\\.from=" + d + end).matcher(plain).find()
+                || java.util.regex.Pattern.compile("\\bdkim=pass\\b[^;]*\\bheader\\.(?:i=[^@\\s;]*@|d=)" + d + end).matcher(plain).find();
         }
     }
 
@@ -133,7 +154,7 @@ public class MailFetcher {
             for (String folderName : config.supportFolders) try (Folder inbox = store.getFolder(folderName)) {
                 inbox.open(Folder.READ_ONLY);
                 Message[] unseen = inbox.search(new FlagTerm(new Flags(Flags.Flag.SEEN), false));
-                for (Message m : unseen) {
+                for (Message m : unseen) try {
                     String fromAddr = extractFrom(m);
                     if (fromAddr == null) continue;
                     String from = fromAddr.toLowerCase();
@@ -145,9 +166,14 @@ public class MailFetcher {
                     // Gmail shows one message in every label it carries.
                     if (messageId.isEmpty() || alreadyHandled.test(messageId) || !taken.add(messageId)) continue;
                     out.add(toCustomerMail(m, fromAddr, messageId));
+                } catch (MessagingException | IOException | RuntimeException e) {
+                    // One malformed message must not stop the rest; it stays unread for a person.
+                    System.err.println("skipping unreadable message in " + folderName + ": " + e.getMessage());
                 }
+            } catch (MessagingException e) {
+                System.err.println("cannot read folder " + folderName + ": " + e.getMessage());
             }
-        } catch (MessagingException | IOException e) {
+        } catch (MessagingException e) {
             throw new RuntimeException("IMAP fetch failed: " + e.getMessage(), e);
         }
         return out;
@@ -164,7 +190,9 @@ public class MailFetcher {
             for (String folderName : config.supportFolders) try (Folder inbox = store.getFolder(folderName)) {
                 inbox.open(Folder.READ_ONLY);
                 for (Message m : inbox.search(new jakarta.mail.search.HeaderTerm("Message-Id", messageId))) {
-                    return toCustomerMail(m, extractFrom(m), firstHeader(m, "Message-Id"));
+                    if (messageId.equals(firstHeader(m, "Message-Id"))) {
+                        return toCustomerMail(m, extractFrom(m), messageId);
+                    }
                 }
             }
         } catch (MessagingException | IOException e) {
@@ -186,7 +214,8 @@ public class MailFetcher {
                 allHeaders(m, "Authentication-Results"),
                 List.of(),
                 fromName(m),
-                addresses(m.getRecipients(Message.RecipientType.CC)));
+                addresses(m.getRecipients(Message.RecipientType.CC)),
+                addresses(m.getRecipients(Message.RecipientType.TO)));
     }
 
     /** Mark one message read once it has been answered. */
@@ -199,7 +228,8 @@ public class MailFetcher {
             for (String folderName : config.supportFolders) try (Folder inbox = store.getFolder(folderName)) {
                 inbox.open(Folder.READ_WRITE);
                 for (Message m : inbox.search(new jakarta.mail.search.HeaderTerm("Message-Id", messageId))) {
-                    m.setFlag(Flags.Flag.SEEN, true);
+                    // SEARCH HEADER matches substrings: flag only the exact message.
+                    if (messageId.equals(firstHeader(m, "Message-Id"))) m.setFlag(Flags.Flag.SEEN, true);
                 }
             }
         } catch (MessagingException e) {
@@ -260,7 +290,10 @@ public class MailFetcher {
     /** All values of a header joined - Authentication-Results may repeat. */
     private static String allHeaders(Message m, String name) throws MessagingException {
         String[] h = m.getHeader(name);
-        return h == null ? "" : String.join("\n", h);
+        if (h == null) return "";
+        // Unfold, so each header is one line and line one is the topmost.
+        return java.util.Arrays.stream(h).map(v -> v.replaceAll("\\r?\\n[ \\t]+", " "))
+                .collect(java.util.stream.Collectors.joining("\n"));
     }
 
     /**

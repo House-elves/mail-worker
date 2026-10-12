@@ -93,6 +93,8 @@ public class EmailSender {
         String refs = inbound.references() == null ? "" : inbound.references().trim();
         out.setHeader("In-Reply-To", inbound.messageId());
         out.setHeader("References", refs.isEmpty() ? inbound.messageId() : refs + " " + inbound.messageId());
+        // RFC 3834: tells other auto-responders not to answer this one.
+        out.setHeader("Auto-Submitted", "auto-replied");
         out.setSentDate(new Date());
         out.setText(body, "UTF-8");
         Transport.send(out);
