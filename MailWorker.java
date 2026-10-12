@@ -5,7 +5,7 @@
 //DEPS jakarta.mail:jakarta.mail-api:2.1.3
 //DEPS org.eclipse.angus:angus-mail:2.0.3
 //SOURCES Config.java MailFetcher.java MailTriager.java MailAction.java EmailSender.java IdempotencyStore.java
-//SOURCES PendingStore.java BusHandlers.java Installer.java
+//SOURCES PendingStore.java BusHandlers.java Installer.java CustomerMail.java
 //SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/EnvelopeOptions.java
 //SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusEnvelope.java
 //SOURCES https://raw.githubusercontent.com/House-elves/elf-bus-common/v1.0.1/ElfBusHandler.java
@@ -38,6 +38,10 @@ public class MailWorker implements Runnable {
     @Option(names = "--once", description = "Run a single poll cycle and exit (default).")
     boolean once = true;
 
+    @Option(names = "--customer-test", paramLabel = "MESSAGE_ID",
+            description = "Run the customer-mail path on one message (read or not) and email the outcome to the principal only. Nothing goes to the customer and nothing is marked.")
+    String customerTest;
+
     public static void main(String[] args) {
         System.exit(new CommandLine(new MailWorker()).execute(args));
     }
@@ -51,6 +55,11 @@ public class MailWorker implements Runnable {
 
         Config config = Config.load();
         config.validate();
+
+        if (customerTest != null) {
+            runCustomerTest(config, customerTest);
+            return;
+        }
 
         if (!config.isWithinActiveHours()) {
             System.out.println("outside active hours; exiting");
@@ -125,16 +134,74 @@ public class MailWorker implements Runnable {
                     // Leave UNSEEN on the IMAP side and unmarked locally → retry next tick.
                 }
             }
+
+            // 3. Customer mail: people off the allow-list writing in. Left
+            //    unread unless answered, so a person still sees whatever this
+            //    passes over. See CustomerMail for what is checked in code.
+            if (config.supportEnabled()) {
+                var customers = new CustomerMail(config, sender);
+                List<MailFetcher.InboundMail> waiting;
+                try {
+                    waiting = fetcher.fetchUnseenCustomerMail(seen::contains);
+                } catch (RuntimeException e) {
+                    System.err.println("customer mail fetch: " + e.getMessage());
+                    waiting = List.of();
+                }
+                System.out.printf("fetched %d customer message(s)%n", waiting.size());
+                for (var msg : waiting) {
+                    System.out.printf("customer mail from=%s subj=%s%n", msg.from(), msg.subject());
+                    try {
+                        var decision = customers.check(msg, customers.propose(msg));
+                        String actionName = customers.execute(msg, decision, false);
+                        System.out.println("action=" + actionName);
+                        seen.add(msg.messageId());
+                        if (!(decision instanceof CustomerMail.Ignore)) fetcher.markSeen(msg.messageId());
+                        logTriage(config, msg, actionName, null);
+                    } catch (Exception e) {
+                        System.err.printf("customer mail failed for %s: %s%n", msg.messageId(), e.getMessage());
+                        logTriage(config, msg, null, e.getMessage());
+                        // Retry a few ticks, then hand it to a person rather than calling Claude forever.
+                        try {
+                            if (customers.failedOnce(msg.messageId()) >= 3) {
+                                customers.execute(msg, new CustomerMail.Draft("", "",
+                                        "Bin Chicken could not read this email after three tries, so it needs you."), false);
+                                seen.add(msg.messageId());
+                                fetcher.markSeen(msg.messageId());
+                                logTriage(config, msg, "CustomerGaveUp", e.getMessage());
+                            }
+                        } catch (Exception again) {
+                            System.err.println("could not hand over failed customer mail: " + again.getMessage());
+                        }
+                    }
+                }
+            }
         } catch (IOException e) {
             System.err.println("mail-worker: " + e.getMessage());
             System.exit(1);
         }
     }
 
+    private static void runCustomerTest(Config config, String messageId) {
+        try {
+            var msg = new MailFetcher(config).fetchById(messageId);
+            var customers = new CustomerMail(config, new EmailSender(config));
+            var proposed = customers.propose(msg);
+            var checked = customers.check(msg, proposed);
+            System.out.println("proposed=" + proposed);
+            System.out.println("checked=" + checked);
+            System.out.println("action=" + customers.execute(msg, checked, true));
+        } catch (Exception e) {
+            System.err.println("customer test failed: " + e.getMessage());
+            System.exit(1);
+        }
+    }
+
     private static boolean isSessionMail(Config config, MailFetcher.InboundMail msg) {
         if (!config.sessionSenders.contains(msg.from().toLowerCase())) return false;
-        if (msg.dkimPass()) return true;
-        System.out.printf("session sender %s FAILED DKIM - falling back to triage%n", msg.from());
+        // Not dkimPass(): any signature from any domain satisfies that, so a
+        // forged From signed by the forger's own domain got a session.
+        if (msg.fromDomainVerified()) return true;
+        System.out.printf("session sender %s not verified (DKIM/DMARC for the From domain) - falling back to triage%n", msg.from());
         return false;
     }
 

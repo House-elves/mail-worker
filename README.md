@@ -19,6 +19,24 @@ The triage agent picks exactly one action from this menu per inbound email:
 | `comment-on-issue` | Enqueue `github.issue.comment` onto the bus. |
 | `label-issue` | Enqueue `github.issue.label` onto the bus. Restricted to the `approval:granted` label. |
 
+### Customer mail (people off the allow-list)
+
+Optional, and on only while `~/.config/mail-worker/customer-mail.md` exists (this repo's copy is written for Great Southern Websites). Unread mail from anyone not on `ALLOWED_SENDERS`, in any `SUPPORT_FOLDERS` folder, goes to a separate zero-tool agent (`CustomerMail`), which proposes one of:
+
+| Proposal | Outcome |
+|---|---|
+| `ignore` | Not for a person (spam, a pitch). Left unread. |
+| `draft` | The principal gets an email: what they want, why it needs a person, and a reply ready to edit and send. |
+| `reply` | A clear-cut how-to question, answered directly to the sender from `SUPPORT_FROM`, copied to the principal. |
+
+A proposed `reply` is sent only if all of these hold, and otherwise becomes a `draft`: `SUPPORT_AUTO_REPLY=true`, Gmail's own Authentication-Results vouches for the From domain (DMARC pass, or a passing DKIM signature from that domain), the email was addressed only to us, the answer is under 2,500 characters with no link or domain other than ours or the sender's, and the sender has had fewer than `SUPPORT_REPLIES_PER_DAY` replies in 24 hours. A reply goes only to the inbound sender. Bulk, list, auto-submitted, no-reply, bounce and calendar-response mail is dropped in code before any Claude call. A message that fails three times goes to the principal as a draft. Mail older than `SUPPORT_SINCE` (default: the last three days) is left alone, so turning this on does not answer a backlog.
+
+Try it on one message without writing to anyone but the principal:
+
+```bash
+mail-worker --customer-test '<message-id@example.com>'
+```
+
 ### Bus kinds it consumes
 
 mail-worker also processes envelopes that peer elves enqueue into its own inbox:
@@ -62,6 +80,12 @@ Stored in `~/.config/mail-worker/config` as `KEY=VALUE` lines:
 | `ACTIVE_HOURS` | no | `07-22` | Only triage between these hours. |
 | `AGENT_MODEL` | no | `claude-sonnet-4-6` | Which Claude model the triage agent uses. |
 | `BUS_ROOT` | no | `$XDG_DATA_HOME/elf-bus` | Where peer inboxes live. |
+| `SUPPORT_FOLDERS` | no | `INBOX` | Folders (Gmail labels) to read customer mail from. A Gmail filter that skips the inbox needs its label listed. |
+| `SUPPORT_AUTO_REPLY` | no | `false` | Let clear-cut customer mail be answered directly. Off = every answer is a draft for the principal. |
+| `SUPPORT_FROM` / `SUPPORT_FROM_NAME` | no | `SMTP_USER` / `ELF_NAME` | Sender on direct customer replies; must be a send-as alias of `SMTP_USER`. |
+| `SUPPORT_MODEL` | no | `AGENT_MODEL` | Model for customer mail. |
+| `SUPPORT_REPLIES_PER_DAY` | no | `2` | Direct replies to one sender per 24 hours before falling back to drafts. |
+| `SUPPORT_SINCE` | no | 3 days ago | ISO instant; customer mail received earlier is left alone. |
 | `STATE_DIR` | no | `$XDG_STATE_HOME/mail-worker` | Local state (logs, idempotency, pending replies). |
 
 ## Security model
@@ -69,7 +93,7 @@ Stored in `~/.config/mail-worker/config` as `KEY=VALUE` lines:
 mail-worker enforces five invariants regardless of what the triage agent or a producer elf asks for:
 
 1. **Sender allow-list (inbound).** Only mail from `ALLOWED_SENDERS` reaches the triage agent. Everything else is silently dropped before any Claude call.
-1. **Session gate.** The `run-session` route (remote code execution by design) is decided in code, never by the triage agent: sender must be in `SESSION_SENDERS` AND the message must carry `dkim=pass` in Gmail's `Authentication-Results`. A session sender that fails DKIM smells like spoofing and falls back to zero-tool triage.
+1. **Session gate.** The `run-session` route (remote code execution by design) is decided in code, never by the triage agent: sender must be in `SESSION_SENDERS` AND Gmail's topmost `Authentication-Results` must show DMARC passing, or a DKIM signature from the From domain passing. Any `dkim=pass` used to do, which a forger signing with their own domain satisfied. A session sender that fails DKIM smells like spoofing and falls back to zero-tool triage.
 2. **Recipient allow-list (outbound).** The `mail.send` bus handler refuses any `to:` address not in `ALLOWED_RECIPIENTS`. Forbidden recipients dead-letter on the first attempt — no retry — so a misbehaving producer can't loop on a rejected address.
 3. **Zero-tool triage.** Triage runs in `runBare` mode — no tools, no filesystem, no shell. The email body is fenced in the system prompt and explicitly marked as untrusted data.
 4. **Action allow-list.** Enforced in code, not in the prompt. The label action accepts only `approval:granted`; forbidden labels are rejected by the executor even if the model emits them.

@@ -73,11 +73,16 @@ public class MailTriager {
     }
 
     private String runBare(String systemPrompt, String userPrompt) throws IOException, InterruptedException {
+        return runBare(config.agentModel, systemPrompt, userPrompt);
+    }
+
+    /** One zero-tool Claude call; shared with {@link CustomerMail}. */
+    static String runBare(String model, String systemPrompt, String userPrompt) throws IOException, InterruptedException {
         // Equivalent to: claude -p USER --model X --append-system-prompt SYSTEM
         //                       --allowedTools "" --permission-mode bypassPermissions
         ProcessBuilder pb = new ProcessBuilder(
                 "claude", "-p", userPrompt,
-                "--model", config.agentModel,
+                "--model", model,
                 "--append-system-prompt", systemPrompt,
                 "--allowedTools", "",
                 "--permission-mode", "bypassPermissions"
