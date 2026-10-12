@@ -26,8 +26,17 @@ public class MailFetcher {
             String body,
             String references,
             String authResults,
-            List<String> attachments
+            List<String> attachments,
+            String fromName,
+            List<String> cc
     ) {
+        public InboundMail(String messageId, String from, String subject, String date,
+                String inReplyTo, String body, String references, String authResults,
+                List<String> attachments) {
+            this(messageId, from, subject, date, inReplyTo, body, references, authResults,
+                    attachments, "", List.of());
+        }
+
         /** Convenience for legacy call sites that carry no session fields. */
         public InboundMail(String messageId, String from, String subject,
                 String date, String inReplyTo, String body) {
@@ -99,6 +108,141 @@ public class MailFetcher {
             throw new RuntimeException("IMAP fetch failed: " + e.getMessage(), e);
         }
         return out;
+    }
+
+    /**
+     * Unseen mail from people off the allow-list (customers, prospects) that
+     * is worth a person's answer, from every SUPPORT_FOLDERS folder. Read with PEEK and left UNSEEN: the caller
+     * marks a message seen only once it has drafted or sent an answer, so
+     * anything it passes over still shows as unread in the mailbox.
+     *
+     * Machine mail is dropped here, in code, before any Claude call: bulk and
+     * list mail, auto-replies, bounces, calendar responses, and mail from the
+     * team's own addresses.
+     */
+    public List<InboundMail> fetchUnseenCustomerMail(java.util.function.Predicate<String> alreadyHandled) {
+        List<InboundMail> out = new ArrayList<>();
+        Properties props = new Properties();
+        props.put("mail.store.protocol", "imaps");
+        props.put("mail.imaps.peek", "true");
+        Session session = Session.getInstance(props);
+
+        try (Store store = session.getStore("imaps")) {
+            store.connect(config.imapHost, config.imapPort, config.imapUser, config.imapPassword);
+            java.util.Set<String> taken = new java.util.HashSet<>();
+            for (String folderName : config.supportFolders) try (Folder inbox = store.getFolder(folderName)) {
+                inbox.open(Folder.READ_ONLY);
+                Message[] unseen = inbox.search(new FlagTerm(new Flags(Flags.Flag.SEEN), false));
+                for (Message m : unseen) {
+                    String fromAddr = extractFrom(m);
+                    if (fromAddr == null) continue;
+                    String from = fromAddr.toLowerCase();
+                    if (config.allowedSenders.contains(from) || isOwnAddress(from)) continue;
+                    java.util.Date received = m.getReceivedDate();
+                    if (received != null && received.toInstant().isBefore(config.supportSince)) continue;
+                    if (isMachineMail(m, from)) continue;
+                    String messageId = firstHeader(m, "Message-Id");
+                    // Gmail shows one message in every label it carries.
+                    if (messageId.isEmpty() || alreadyHandled.test(messageId) || !taken.add(messageId)) continue;
+                    out.add(toCustomerMail(m, fromAddr, messageId));
+                }
+            }
+        } catch (MessagingException | IOException e) {
+            throw new RuntimeException("IMAP fetch failed: " + e.getMessage(), e);
+        }
+        return out;
+    }
+
+    /** One message by Message-Id, read or not, for a test run of the customer-mail path. */
+    public InboundMail fetchById(String messageId) {
+        Properties props = new Properties();
+        props.put("mail.store.protocol", "imaps");
+        props.put("mail.imaps.peek", "true");
+        Session session = Session.getInstance(props);
+        try (Store store = session.getStore("imaps")) {
+            store.connect(config.imapHost, config.imapPort, config.imapUser, config.imapPassword);
+            for (String folderName : config.supportFolders) try (Folder inbox = store.getFolder(folderName)) {
+                inbox.open(Folder.READ_ONLY);
+                for (Message m : inbox.search(new jakarta.mail.search.HeaderTerm("Message-Id", messageId))) {
+                    return toCustomerMail(m, extractFrom(m), firstHeader(m, "Message-Id"));
+                }
+            }
+        } catch (MessagingException | IOException e) {
+            throw new RuntimeException("IMAP fetch failed: " + e.getMessage(), e);
+        }
+        throw new IllegalArgumentException("no message with Message-Id " + messageId);
+    }
+
+    private InboundMail toCustomerMail(Message m, String fromAddr, String messageId)
+            throws MessagingException, IOException {
+        return new InboundMail(
+                messageId,
+                fromAddr,
+                nullSafe(m.getSubject()),
+                firstHeader(m, "Date"),
+                firstHeader(m, "In-Reply-To"),
+                extractTextBody(m),
+                firstHeader(m, "References"),
+                allHeaders(m, "Authentication-Results"),
+                List.of(),
+                fromName(m),
+                addresses(m.getRecipients(Message.RecipientType.CC)));
+    }
+
+    /** Mark one message read once it has been answered. */
+    public void markSeen(String messageId) {
+        Properties props = new Properties();
+        props.put("mail.store.protocol", "imaps");
+        Session session = Session.getInstance(props);
+        try (Store store = session.getStore("imaps")) {
+            store.connect(config.imapHost, config.imapPort, config.imapUser, config.imapPassword);
+            for (String folderName : config.supportFolders) try (Folder inbox = store.getFolder(folderName)) {
+                inbox.open(Folder.READ_WRITE);
+                for (Message m : inbox.search(new jakarta.mail.search.HeaderTerm("Message-Id", messageId))) {
+                    m.setFlag(Flags.Flag.SEEN, true);
+                }
+            }
+        } catch (MessagingException e) {
+            System.err.println("could not mark " + messageId + " seen: " + e.getMessage());
+        }
+    }
+
+    /** Our own mailbox and the principal: never treat them as customers. */
+    private boolean isOwnAddress(String from) {
+        return from.equalsIgnoreCase(config.imapUser) || from.equalsIgnoreCase(config.smtpUser)
+                || from.equalsIgnoreCase(config.supportFrom) || from.equalsIgnoreCase(config.principalEmail);
+    }
+
+    private static boolean isMachineMail(Message m, String from) throws MessagingException {
+        String local = from.substring(0, Math.max(0, from.indexOf('@')));
+        if (local.matches("(?i).*(no-?reply|do-?not-?reply|mailer-daemon|postmaster|bounce|notifications?).*")) {
+            return true;
+        }
+        String auto = firstHeader(m, "Auto-Submitted");
+        if (!auto.isEmpty() && !auto.equalsIgnoreCase("no")) return true;
+        if (firstHeader(m, "Precedence").toLowerCase().matches("bulk|list|junk|auto_reply")) return true;
+        if (!firstHeader(m, "List-Id").isEmpty() || !firstHeader(m, "List-Unsubscribe").isEmpty()) return true;
+        if (!firstHeader(m, "X-Autoreply").isEmpty() || !firstHeader(m, "X-Autorespond").isEmpty()) return true;
+        String subject = nullSafe(m.getSubject());
+        // Calendar responses ("Accepted: Website chat") and out-of-office notes.
+        if (subject.matches("(?i)^(accepted|declined|tentative|updated invitation|invitation)( \\(.*\\))?:.*")) return true;
+        if (subject.matches("(?i)^(automatic reply|auto(matic)?[- ]?reply|out of (the )?office).*")) return true;
+        return false;
+    }
+
+    private static String fromName(Message m) throws MessagingException {
+        Address[] from = m.getFrom();
+        if (from != null && from.length > 0 && from[0] instanceof InternetAddress ia && ia.getPersonal() != null) {
+            return ia.getPersonal();
+        }
+        return "";
+    }
+
+    private static List<String> addresses(Address[] list) {
+        if (list == null) return List.of();
+        List<String> out = new ArrayList<>();
+        for (Address a : list) out.add(a instanceof InternetAddress ia ? ia.getAddress() : a.toString());
+        return List.copyOf(out);
     }
 
     private static String extractFrom(Message m) throws MessagingException {

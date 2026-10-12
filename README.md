@@ -19,6 +19,24 @@ The triage agent picks exactly one action from this menu per inbound email:
 | `comment-on-issue` | Enqueue `github.issue.comment` onto the bus. |
 | `label-issue` | Enqueue `github.issue.label` onto the bus. Restricted to the `approval:granted` label. |
 
+### Customer mail (people off the allow-list)
+
+Optional, and on only while `~/.config/mail-worker/customer-mail.md` exists (this repo's copy is written for Great Southern Websites). Unread mail from anyone not on `ALLOWED_SENDERS`, in any `SUPPORT_FOLDERS` folder, goes to a separate zero-tool agent (`CustomerMail`), which proposes one of:
+
+| Proposal | Outcome |
+|---|---|
+| `ignore` | Not for a person (spam, a pitch). Left unread. |
+| `draft` | The principal gets an email: what they want, why it needs a person, and a reply ready to edit and send. |
+| `reply` | A clear-cut how-to question, answered directly to the sender from `SUPPORT_FROM`, copied to the principal. |
+
+A proposed `reply` is sent only if all of these hold, and otherwise becomes a `draft`: `SUPPORT_AUTO_REPLY=true`, the sender passed DKIM, nobody else is copied on their email, the answer is under 2,500 characters with no link or domain other than ours or the sender's, and the sender has had fewer than `SUPPORT_REPLIES_PER_DAY` replies in 24 hours. A reply goes only to the inbound sender. Bulk, list, auto-submitted, no-reply, bounce and calendar-response mail is dropped in code before any Claude call. Mail older than `SUPPORT_SINCE` (default: the last three days) is left alone, so turning this on does not answer a backlog.
+
+Try it on one message without writing to anyone but the principal:
+
+```bash
+mail-worker --customer-test '<message-id@example.com>'
+```
+
 ### Bus kinds it consumes
 
 mail-worker also processes envelopes that peer elves enqueue into its own inbox:
@@ -62,6 +80,12 @@ Stored in `~/.config/mail-worker/config` as `KEY=VALUE` lines:
 | `ACTIVE_HOURS` | no | `07-22` | Only triage between these hours. |
 | `AGENT_MODEL` | no | `claude-sonnet-4-6` | Which Claude model the triage agent uses. |
 | `BUS_ROOT` | no | `$XDG_DATA_HOME/elf-bus` | Where peer inboxes live. |
+| `SUPPORT_FOLDERS` | no | `INBOX` | Folders (Gmail labels) to read customer mail from. A Gmail filter that skips the inbox needs its label listed. |
+| `SUPPORT_AUTO_REPLY` | no | `false` | Let clear-cut customer mail be answered directly. Off = every answer is a draft for the principal. |
+| `SUPPORT_FROM` / `SUPPORT_FROM_NAME` | no | `SMTP_USER` / `ELF_NAME` | Sender on direct customer replies; must be a send-as alias of `SMTP_USER`. |
+| `SUPPORT_MODEL` | no | `AGENT_MODEL` | Model for customer mail. |
+| `SUPPORT_REPLIES_PER_DAY` | no | `2` | Direct replies to one sender per 24 hours before falling back to drafts. |
+| `SUPPORT_SINCE` | no | 3 days ago | ISO instant; customer mail received earlier is left alone. |
 | `STATE_DIR` | no | `$XDG_STATE_HOME/mail-worker` | Local state (logs, idempotency, pending replies). |
 
 ## Security model

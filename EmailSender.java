@@ -73,4 +73,29 @@ public class EmailSender {
         Transport.send(out);
         return out.getMessageID();
     }
+
+    /**
+     * A reply to a customer, from the support address and copied to the
+     * principal, threaded onto their message. The recipient is always the
+     * inbound sender: the caller passes the inbound mail, never an address.
+     */
+    public String replyToCustomer(MailFetcher.InboundMail inbound, String body) throws MessagingException {
+        MimeMessage out = new MimeMessage(session);
+        try {
+            out.setFrom(new InternetAddress(config.supportFrom, config.supportFromName));
+        } catch (java.io.UnsupportedEncodingException e) {
+            out.setFrom(new InternetAddress(config.supportFrom));
+        }
+        out.setRecipients(Message.RecipientType.TO, new Address[]{ new InternetAddress(inbound.from()) });
+        out.setRecipients(Message.RecipientType.CC, new Address[]{ new InternetAddress(config.principalEmail) });
+        String subj = inbound.subject() == null ? "" : inbound.subject();
+        out.setSubject(subj.regionMatches(true, 0, "Re:", 0, 3) ? subj : "Re: " + subj, "UTF-8");
+        String refs = inbound.references() == null ? "" : inbound.references().trim();
+        out.setHeader("In-Reply-To", inbound.messageId());
+        out.setHeader("References", refs.isEmpty() ? inbound.messageId() : refs + " " + inbound.messageId());
+        out.setSentDate(new Date());
+        out.setText(body, "UTF-8");
+        Transport.send(out);
+        return out.getMessageID();
+    }
 }

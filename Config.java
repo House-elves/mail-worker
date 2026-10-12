@@ -42,6 +42,18 @@ public class Config {
     Path stateDir;
     Path busRoot;
 
+    // Customer mail: on when ~/.config/mail-worker/customer-mail.md exists.
+    // Mail from anyone off the allow-list (a customer, a prospect) gets a
+    // drafted answer emailed to the principal, or, when SUPPORT_AUTO_REPLY
+    // is on and the case is clear cut, a direct reply copied to the principal.
+    java.time.Instant supportSince;  // ignore mail received before this (no backlog on first run)
+    boolean supportAutoReply;        // false = every answer is a draft for the principal
+    String  supportFrom;             // From address on direct replies (a send-as alias of SMTP_USER)
+    String  supportFromName;         // display name on direct replies
+    String  supportModel;            // model for customer mail; defaults to AGENT_MODEL
+    int     supportRepliesPerDay;    // direct replies to one sender per 24h before it falls back to drafts
+    List<String> supportFolders;     // where customer mail lands; a Gmail filter can skip the inbox
+
     static Config load() {
         if (!Files.exists(CONFIG_PATH)) {
             System.err.println("Config file not found: " + CONFIG_PATH);
@@ -89,6 +101,18 @@ public class Config {
         c.agentModel     = raw.getOrDefault("AGENT_MODEL", "claude-sonnet-4-6");
         c.stateDir       = Path.of(raw.getOrDefault("STATE_DIR", STATE_DIR_DEFAULT.toString()));
         c.busRoot        = Path.of(raw.getOrDefault("BUS_ROOT", BUS_ROOT_DEFAULT.toString()));
+        String since     = raw.getOrDefault("SUPPORT_SINCE", "");
+        // Unset: the last three days, so turning it on picks up what is waiting
+        // but never answers a months-old backlog.
+        c.supportSince   = since.isEmpty() ? java.time.Instant.now().minus(java.time.Duration.ofDays(3))
+                                         : java.time.Instant.parse(since);
+        c.supportAutoReply = Boolean.parseBoolean(raw.getOrDefault("SUPPORT_AUTO_REPLY", "false"));
+        c.supportFrom    = raw.getOrDefault("SUPPORT_FROM", c.smtpUser);
+        c.supportFromName = raw.getOrDefault("SUPPORT_FROM_NAME", c.elfName);
+        c.supportModel   = raw.getOrDefault("SUPPORT_MODEL", c.agentModel);
+        c.supportRepliesPerDay = Integer.parseInt(raw.getOrDefault("SUPPORT_REPLIES_PER_DAY", "2"));
+        c.supportFolders = Arrays.stream(raw.getOrDefault("SUPPORT_FOLDERS", "INBOX").split(","))
+                .map(String::strip).filter(f -> !f.isEmpty()).toList();
         return c;
     }
 
@@ -122,6 +146,9 @@ public class Config {
     Path        busSeenIdsPath()    { return stateDir.resolve("elf-bus-seen"); }
     Path        attachmentsDir()    { return stateDir.resolve("attachments"); }
     Set<String> allowedRecipients() { return allowedRecipients; }
+    Path        supportPromptPath() { return CONFIG_DIR.resolve("customer-mail.md"); }
+    boolean     supportEnabled()    { return Files.exists(supportPromptPath()); }
+    Path        supportRepliesLog() { return stateDir.resolve("customer-replies.log"); }
 
     private static Set<String> parseSet(String csv) {
         return Arrays.stream(csv.split(","))
